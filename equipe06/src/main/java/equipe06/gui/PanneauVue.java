@@ -23,10 +23,14 @@ public class PanneauVue extends JPanel {
     private int lastClickY = -1;
     public boolean deleteTriggered = false;
     public boolean modifyTriggered;
-    private static final double SCALE_FACTOR = 0.09; // Facteur d'échelle de 10%
+    private static final double SCALE_FACTOR = 0.09;
 
-    private double zoomFactor = 1.0; // Facteur de zoom initial
-    private boolean peutCreerCoupe = false;  // bool pour savoir si l'utilisateur veut créer une coupe ou non
+    private double zoomFactor = 1.0;
+    private boolean peutCreerCoupe = false;
+
+    // Variables pour gérer le décalage de la vue lors du zoom
+    private double offsetX = 0.0;
+    private double offsetY = 0.0;
 
     public PanneauVue(MainWindow mainWindow) {
         this.mainWindow = mainWindow;
@@ -34,11 +38,11 @@ public class PanneauVue extends JPanel {
         this.controleur = Controleur.getInstance();
         PanneauDTO panneauDTO = controleur.getPanneau();
 
-        // Conversion des dimensions de la table CNC (3m x 1.5m) en appliquant un facteur d'échelle
-        this.largeurPixelsTable = (int) (repere.convertirEnPixels(3000) * SCALE_FACTOR); // 3 mètres en mm
-        this.hauteurPixelsTable = (int) (repere.convertirEnPixels(1500) * SCALE_FACTOR); // 1.5 mètres en mm
+        // Conversion des dimensions de la table CNC en appliquant un facteur d'échelle
+        this.largeurPixelsTable = (int) (repere.convertirEnPixels(3000) * SCALE_FACTOR);
+        this.hauteurPixelsTable = (int) (repere.convertirEnPixels(1500) * SCALE_FACTOR);
 
-        // Conversion des dimensions du panneau au-dessus avec facteur d'échelle
+        // Conversion des dimensions du panneau avec facteur d'échelle
         this.largeurPixelsPanneau = (int) (repere.convertirEnPixels(panneauDTO.getLargeur()) * SCALE_FACTOR);
         this.hauteurPixelsPanneau = (int) (repere.convertirEnPixels(panneauDTO.getLongueur()) * SCALE_FACTOR);
 
@@ -57,22 +61,47 @@ public class PanneauVue extends JPanel {
             @Override
             public void mouseWheelMoved(MouseWheelEvent e) {
                 int notches = e.getWheelRotation();
+                double oldZoomFactor = zoomFactor;
+
                 if (notches < 0) {
                     // Molette vers le haut -> zoom avant
                     zoomFactor += 0.1;
                     if (zoomFactor > 3.0) {
-                        zoomFactor = 3.0; // Limiter le zoom maximal à 300%
+                        zoomFactor = 3.0;
                     }
                 } else {
                     // Molette vers le bas -> zoom arrière
                     zoomFactor -= 0.1;
-                    if (zoomFactor < 0.5) {
-                        zoomFactor = 0.5; // Limiter le zoom minimal à 50%
+                    if (zoomFactor < 1.0) {
+                        zoomFactor = 1.0; // Réinitialiser à l'état initial
+                        resetView();
                     }
                 }
+
+                // Si le zoomFactor est revenu à 1, réinitialiser complètement la vue
+                if (zoomFactor == 1.0) {
+                    resetView();
+                } else {
+                    // Sinon, ajuster le décalage proportionnellement au facteur de zoom
+                    double scaleChange = zoomFactor / oldZoomFactor;
+                    int mouseX = e.getX();
+                    int mouseY = e.getY();
+
+                    offsetX = mouseX - (mouseX - offsetX) * scaleChange;
+                    offsetY = mouseY - (mouseY - offsetY) * scaleChange;
+                }
+
                 repaint(); // Redessiner après le changement de zoom
             }
         });
+    }
+
+    private void resetView() {
+        // Réinitialiser les variables de zoom et de décalage
+        zoomFactor = 1.0;
+        offsetX = 0.0;
+        offsetY = 0.0;
+        repaint(); // Redessiner la vue pour l'état initial
     }
 
     private void drawingPanelMouseClicked(java.awt.event.MouseEvent evt) {
@@ -80,13 +109,23 @@ public class PanneauVue extends JPanel {
             lastClickX = evt.getX();
             lastClickY = evt.getY();
             repaint();
-            peutCreerCoupe = false; // Réinitialiser la possibilité de création de coupe après un clic
+            peutCreerCoupe = false;
         } else {
-            // Clic pour zoomer
+            // Zoom centré sur le clic
+            double oldZoomFactor = zoomFactor;
             zoomFactor += 0.2;
             if (zoomFactor > 3.0) {
-                zoomFactor = 1.0; // Réinitialiser le zoom si on dépasse un certain niveau
+                zoomFactor = 3.0; // Limiter le zoom maximal
             }
+
+            // Calculer la différence pour recadrer le point autour du clic
+            double scaleChange = zoomFactor / oldZoomFactor;
+            int clickX = evt.getX();
+            int clickY = evt.getY();
+
+            offsetX = clickX - (clickX - offsetX) * scaleChange;
+            offsetY = clickY - (clickY - offsetY) * scaleChange;
+
             repaint();
         }
     }
@@ -97,7 +136,8 @@ public class PanneauVue extends JPanel {
 
         Graphics2D g2d = (Graphics2D) g;
 
-        // Appliquer le facteur de zoom
+        // Appliquer le facteur de zoom et le décalage
+        g2d.translate(offsetX, offsetY);
         g2d.scale(zoomFactor, zoomFactor);
 
         // Dessiner la table CNC en gris clair avec une bordure noire
