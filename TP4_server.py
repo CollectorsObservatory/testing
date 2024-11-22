@@ -47,8 +47,6 @@ class Server:
         # Vérification des dossiers de données
         os.makedirs(gloutils.SERVER_DATA_DIR, exist_ok=True)
         os.makedirs(os.path.join(gloutils.SERVER_DATA_DIR, gloutils.SERVER_LOST_DIR), exist_ok=True)
-        self._server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-
 
     def cleanup(self) -> None:
         """Ferme toutes les connexions résiduelles."""
@@ -209,4 +207,4 @@ def _main() -> int:
 
 
 if __name__ == '__main__':
-    sys.exit(_main())
+    sys.exit(_main()) 

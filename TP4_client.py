@@ -1,15 +1,14 @@
 """
-GLO-2000 Travail pratique 4 - Serveur
+GLO-2000 Travail pratique 4 - Client
 Noms et numéros étudiants:
 - Alice Dupuis (12345678)
 - Bob Tremblay (87654321)
 - Charlie Martin (11223344)
 """
 
-import hashlib
+import argparse
+import getpass
 import json
-import os
-import select
 import socket
 import sys
 
@@ -17,212 +16,175 @@ import glosocket
 import gloutils
 
 
-class Server:
-    """Serveur mail @glo2000.ca."""
+class Client:
+    """Client pour le serveur mail @glo2000.ca."""
 
-    def __init__(self) -> None:
+    def __init__(self, destination: str) -> None:
         """
-        Prépare le socket du serveur `_server_socket`
-        et le met en mode écoute.
+        Prépare et connecte le socket du client `_socket`.
 
-        Prépare les attributs suivants:
-        - `_client_socs` une liste des sockets clients.
-        - `_logged_users` un dictionnaire associant chaque
-          socket client à un nom d'utilisateur.
-
-        S'assure que les dossiers de données du serveur existent.
+        Prépare un attribut `_username` pour stocker le nom d'utilisateur
+        courant. Laissé vide quand l'utilisateur n'est pas connecté.
         """
-        self._server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            self._server_socket.bind(("", gloutils.APP_PORT))
-            self._server_socket.listen()
-            print(f"Le serveur est en écoute sur le port {gloutils.APP_PORT}")
+            self._socket.connect((destination, gloutils.APP_PORT))
         except socket.error as e:
-            print(f"Erreur lors de la configuration du serveur : {e}")
+            print(f"Erreur de connexion : {e}")
             sys.exit(1)
+        self._username = ""
 
-        self._client_socs = []
-        self._logged_users = {}
+    def _register(self) -> None:
+        """Demande un nom d'utilisateur et un mot de passe pour créer un compte."""
+        username = input("Entrez un nom d'utilisateur : ")
+        password = getpass.getpass("Entrez un mot de passe : ")
+        payload = gloutils.AuthPayload(username=username, password=password)
+        message = gloutils.GloMessage(header=gloutils.Headers.AUTH_REGISTER, payload=payload)
+        try:
+            glosocket.snd_mesg(self._socket, json.dumps(message))
+            response = json.loads(glosocket.recv_mesg(self._socket))
+            if response['header'] == gloutils.Headers.OK:
+                self._username = username
+                print("Compte créé avec succès.")
+            else:
+                print(f"Erreur : {response['payload']['error_message']}")
+        except glosocket.GLOSocketError as e:
+            print(f"Erreur de communication : {e}")
 
-        # Vérification des dossiers de données
-        os.makedirs(gloutils.SERVER_DATA_DIR, exist_ok=True)
-        os.makedirs(os.path.join(gloutils.SERVER_DATA_DIR, gloutils.SERVER_LOST_DIR), exist_ok=True)
+    def _login(self) -> None:
+        """Demande un nom d'utilisateur et un mot de passe pour se connecter."""
+        username = input("Entrez votre nom d'utilisateur : ")
+        password = getpass.getpass("Entrez votre mot de passe : ")
+        payload = gloutils.AuthPayload(username=username, password=password)
+        message = gloutils.GloMessage(header=gloutils.Headers.AUTH_LOGIN, payload=payload)
+        try:
+            glosocket.snd_mesg(self._socket, json.dumps(message))
+            response = json.loads(glosocket.recv_mesg(self._socket))
+            if response['header'] == gloutils.Headers.OK:
+                self._username = username
+                print("Connexion réussie.")
+            else:
+                print(f"Erreur : {response['payload']['error_message']}")
+        except glosocket.GLOSocketError as e:
+            print(f"Erreur de communication : {e}")
 
-    def cleanup(self) -> None:
-        """Ferme toutes les connexions résiduelles."""
-        print("Nettoyage des connexions...")
-        for client_soc in self._client_socs:
-            client_soc.close()
-        self._server_socket.close()
+    def _logout(self) -> None:
+        """Déconnecte l'utilisateur courant."""
+        message = gloutils.GloMessage(header=gloutils.Headers.AUTH_LOGOUT)
+        try:
+            glosocket.snd_mesg(self._socket, json.dumps(message))
+            response = json.loads(glosocket.recv_mesg(self._socket))
+            if response['header'] == gloutils.Headers.OK:
+                self._username = ""
+                print("Déconnexion réussie.")
+            else:
+                print(f"Erreur : {response['payload']['error_message']}")
+        except glosocket.GLOSocketError as e:
+            print(f"Erreur de communication : {e}")
 
-    def _accept_client(self) -> None:
-        """Accepte un nouveau client."""
-        client_soc, _ = self._server_socket.accept()
-        self._client_socs.append(client_soc)
-        print("Nouveau client connecté.")
-
-    def _remove_client(self, client_soc: socket.socket) -> None:
-        """Retire le client des structures de données et ferme sa connexion."""
-        if client_soc in self._logged_users:
-            print(f"Déconnexion : {self._logged_users[client_soc]}")
-            del self._logged_users[client_soc]
-        if client_soc in self._client_socs:
-            self._client_socs.remove(client_soc)
-        client_soc.close()
-        print("Client déconnecté.")
-
-    def _create_account(self, client_soc: socket.socket, payload: gloutils.AuthPayload) -> gloutils.GloMessage:
-        """Crée un compte à partir des données fournies."""
-        username = payload["username"]
-        password = payload["password"]
-
-        if not (3 <= len(username) <= 20 and username.isalnum()):
-            return gloutils.GloMessage(header=gloutils.Headers.ERROR, payload={"error_message": "Nom d'utilisateur invalide."})
-
-        if len(password) < 10 or not any(c.isdigit() for c in password) or not any(c.isupper() for c in password):
-            return gloutils.GloMessage(header=gloutils.Headers.ERROR, payload={"error_message": "Mot de passe invalide."})
-
-        user_dir = os.path.join(gloutils.SERVER_DATA_DIR, username)
-        if os.path.exists(user_dir):
-            return gloutils.GloMessage(header=gloutils.Headers.ERROR, payload={"error_message": "Utilisateur déjà existant."})
-
-        os.makedirs(user_dir)
-        hashed_password = hashlib.sha512(password.encode()).hexdigest()
-        with open(os.path.join(user_dir, gloutils.PASSWORD_FILENAME), "w") as f:
-            f.write(hashed_password)
-
-        self._logged_users[client_soc] = username
-        print(f"Compte créé pour : {username}")
-        return gloutils.GloMessage(header=gloutils.Headers.OK)
-
-    def _login(self, client_soc: socket.socket, payload: gloutils.AuthPayload) -> gloutils.GloMessage:
-        """Connecte un utilisateur existant."""
-        username = payload["username"]
-        password = payload["password"]
-
-        user_dir = os.path.join(gloutils.SERVER_DATA_DIR, username)
-        if not os.path.exists(user_dir):
-            return gloutils.GloMessage(header=gloutils.Headers.ERROR, payload={"error_message": "Utilisateur inexistant."})
-
-        with open(os.path.join(user_dir, gloutils.PASSWORD_FILENAME), "r") as f:
-            stored_password = f.read().strip()
-
-        if hashlib.sha512(password.encode()).hexdigest() != stored_password:
-            return gloutils.GloMessage(header=gloutils.Headers.ERROR, payload={"error_message": "Mot de passe incorrect."})
-
-        self._logged_users[client_soc] = username
-        print(f"Connexion réussie pour : {username}")
-        return gloutils.GloMessage(header=gloutils.Headers.OK)
-
-    def _logout(self, client_soc: socket.socket) -> None:
-        """Déconnecte un utilisateur."""
-        username = self._logged_users.pop(client_soc, None)
-        if username:
-            print(f"Utilisateur déconnecté : {username}")
-        else:
-            print("Aucun utilisateur associé à ce socket.")
-
-    def _send_email(self, payload: gloutils.EmailContentPayload) -> gloutils.GloMessage:
-        """Envoi un email interne."""
-        sender = payload["sender"]
-        destination = payload["destination"]
-
-        if not destination.endswith("@glo2000.ca"):
-            return gloutils.GloMessage(header=gloutils.Headers.ERROR, payload={"error_message": "Destinataire externe non supporté."})
-
-        destination_username = destination.split("@")[0]
-        user_dir = os.path.join(gloutils.SERVER_DATA_DIR, destination_username)
-
-        if not os.path.exists(user_dir):
-            lost_dir = os.path.join(gloutils.SERVER_DATA_DIR, gloutils.SERVER_LOST_DIR)
-            os.makedirs(lost_dir, exist_ok=True)
-            lost_email_file = os.path.join(lost_dir, f"{gloutils.get_current_utc_time().replace(':', '_')}.json")
-            with open(lost_email_file, "w") as f:
-                json.dump(payload, f)
-            return gloutils.GloMessage(header=gloutils.Headers.ERROR, payload={"error_message": "Destinataire inconnu. Courriel placé dans LOST."})
-
-        email_file = os.path.join(user_dir, f"{gloutils.get_current_utc_time().replace(':', '_')}.json")
-        with open(email_file, "w") as f:
-            json.dump(payload, f)
-
-        print(f"Courriel envoyé : {sender} -> {destination}")
-        return gloutils.GloMessage(header=gloutils.Headers.OK)
-
-    def _get_email_list(self, client_soc: socket.socket) -> gloutils.GloMessage:
-        """Récupère la liste des emails d'un utilisateur."""
-        username = self._logged_users.get(client_soc, None)
-        if not username:
-            return gloutils.GloMessage(header=gloutils.Headers.ERROR, payload={"error_message": "Utilisateur non connecté."})
-
-        user_dir = os.path.join(gloutils.SERVER_DATA_DIR, username)
-        if not os.path.exists(user_dir):
-            return gloutils.GloMessage(header=gloutils.Headers.ERROR, payload={"error_message": "Aucun courriel trouvé."})
-
-        email_list = sorted(os.listdir(user_dir), reverse=True)
-        emails = []
-        for email_file in email_list:
-            with open(os.path.join(user_dir, email_file), "r") as f:
-                email = json.load(f)
-                emails.append(email)
-
-        return gloutils.GloMessage(header=gloutils.Headers.OK, payload={"emails": emails})
-
-    def _get_stats(self) -> gloutils.GloMessage:
-        """Renvoie des statistiques sur le serveur."""
-        total_users = len(os.listdir(gloutils.SERVER_DATA_DIR)) - 1  # Exclut LOST
-        total_emails = sum(
-            len(files) for _, _, files in os.walk(gloutils.SERVER_DATA_DIR) if "LOST" not in _
-        )
-        connected_users = len(self._logged_users)
-
-        stats_payload = {
-            "total_users": total_users,
-            "total_emails": total_emails,
-            "connected_users": connected_users,
-        }
-        print(f"Statistiques calculées : {stats_payload}")
-        return gloutils.GloMessage(header=gloutils.Headers.OK, payload=stats_payload)
-
-    def run(self):
-        """Point d'entrée du serveur."""
-        while True:
-            readable, _, _ = select.select([self._server_socket] + self._client_socs, [], [])
-            for soc in readable:
-                if soc == self._server_socket:
-                    self._accept_client()
+    def _read_email(self) -> None:
+        """Récupère la liste des emails de l'utilisateur et permet de lire un email spécifique."""
+        message = gloutils.GloMessage(header=gloutils.Headers.INBOX_READING_REQUEST)
+        try:
+            glosocket.snd_mesg(self._socket, json.dumps(message))
+            response = json.loads(glosocket.recv_mesg(self._socket))
+            if response['header'] == gloutils.Headers.OK:
+                emails = response['payload']['emails']
+                if not emails:
+                    print("Aucun courriel disponible.")
+                    return
+                for i, email in enumerate(emails, start=1):
+                    print(f"{i}. {email['subject']} ({email['date']})")
+                choice = int(input("Entrez le numéro du courriel à lire : ")) - 1
+                if 0 <= choice < len(emails):
+                    email = emails[choice]
+                    print(gloutils.EMAIL_DISPLAY.format(**email))
                 else:
-                    try:
-                        message = json.loads(glosocket.recv_mesg(soc))
-                        print(f"Message reçu : {message}")
-                        header = gloutils.Headers(message["header"])
-                        if header == gloutils.Headers.AUTH_REGISTER:
-                            response = self._create_account(soc, message["payload"])
-                        elif header == gloutils.Headers.AUTH_LOGIN:
-                            response = self._login(soc, message["payload"])
-                        elif header == gloutils.Headers.AUTH_LOGOUT:
-                            self._logout(soc)
-                            response = gloutils.GloMessage(header=gloutils.Headers.OK)
-                        elif header == gloutils.Headers.EMAIL_SENDING:
-                            response = self._send_email(message["payload"])
-                        elif header == gloutils.Headers.INBOX_READING_REQUEST:
-                            response = self._get_email_list(soc)
-                        elif header == gloutils.Headers.STATS_REQUEST:
-                            response = self._get_stats()
-                        else:
-                            response = gloutils.GloMessage(header=gloutils.Headers.ERROR, payload={"error_message": "Action non supportée."})
-                        glosocket.snd_mesg(soc, json.dumps(response))
-                    except glosocket.GLOSocketError:
-                        self._remove_client(soc)
+                    print("Choix invalide.")
+            else:
+                print(f"Erreur : {response['payload']['error_message']}")
+        except glosocket.GLOSocketError as e:
+            print(f"Erreur de communication : {e}")
 
+    def _send_email(self) -> None:
+        """Permet à l'utilisateur d'envoyer un email."""
+        destination = input("Entrez l'adresse email du destinataire : ")
+        subject = input("Entrez le sujet : ")
+        print("Entrez le contenu du courriel (terminez par un point seul sur une ligne) :")
+        content = ""
+        while True:
+            line = input()
+            if line == ".":
+                break
+            content += line + "\n"
+        payload = gloutils.EmailContentPayload(
+            sender=self._username,
+            destination=destination,
+            subject=subject,
+            date=gloutils.get_current_utc_time(),
+            content=content.strip()
+        )
+        message = gloutils.GloMessage(header=gloutils.Headers.EMAIL_SENDING, payload=payload)
+        try:
+            glosocket.snd_mesg(self._socket, json.dumps(message))
+            response = json.loads(glosocket.recv_mesg(self._socket))
+            if response['header'] == gloutils.Headers.OK:
+                print("Courriel envoyé avec succès.")
+            else:
+                print(f"Erreur : {response['payload']['error_message']}")
+        except glosocket.GLOSocketError as e:
+            print(f"Erreur de communication : {e}")
+
+    def _check_stats(self) -> None:
+        """Demande les statistiques au serveur."""
+        message = gloutils.GloMessage(header=gloutils.Headers.STATS_REQUEST)
+        try:
+            glosocket.snd_mesg(self._socket, json.dumps(message))
+            response = json.loads(glosocket.recv_mesg(self._socket))
+            if response['header'] == gloutils.Headers.OK:
+                stats = response['payload']
+                print(gloutils.STATS_DISPLAY.format(**stats))
+            else:
+                print(f"Erreur : {response['payload']['error_message']}")
+        except glosocket.GLOSocketError as e:
+            print(f"Erreur de communication : {e}")
+
+    def run(self) -> None:
+        """Point d'entrée du client."""
+        while True:
+            if not self._username:
+                print(gloutils.CLIENT_AUTH_CHOICE)
+                choice = input("Entrez votre choix [1-3] : ")
+                if choice == "1":
+                    self._register()
+                elif choice == "2":
+                    self._login()
+                elif choice == "3":
+                    print("Au revoir !")
+                    sys.exit(0)
+                else:
+                    print("Choix invalide.")
+            else:
+                print(gloutils.CLIENT_USE_CHOICE)
+                choice = input("Entrez votre choix [1-4] : ")
+                if choice == "1":
+                    self._read_email()
+                elif choice == "2":
+                    self._send_email()
+                elif choice == "3":
+                    self._check_stats()
+                elif choice == "4":
+                    self._logout()
+                else:
+                    print("Choix invalide.")
 
 def _main() -> int:
-    server = Server()
-    try:
-        server.run()
-    except KeyboardInterrupt:
-        server.cleanup()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-d", "--destination", required=True, help="Adresse IP du serveur.")
+    args = parser.parse_args()
+    client = Client(args.destination)
+    client.run()
     return 0
 
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     sys.exit(_main())
